@@ -7,6 +7,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 CACHE_DIR = DATA_DIR / "cache"
 CACHE_FILE = CACHE_DIR / "lyrics_cache.json"
+TRANSLATION_CACHE_FILE = CACHE_DIR / "translation_cache.json"
 
 APP_NAME = "Desktop Musik Lirik"
 APP_VERSION = "1.0.0"
@@ -23,11 +24,14 @@ POLL_INTERVAL_SECONDS = 1.2
 UI_TICK_MS = 90
 QUEUE_POLL_MS = 180
 HTTP_TIMEOUT_SECONDS = 12
+TRANSLATE_TIMEOUT_SECONDS = 12
 
 CACHE_TTL_SECONDS = 60 * 60 * 24 * 14
 MISS_TTL_SECONDS = 60 * 15
 
 LRCLIB_SEARCH_URL = "https://lrclib.net/api/search"
+LRCLIB_GET_URL = "https://lrclib.net/api/get"
+GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
 USER_AGENT = f"{APP_NAME}/{APP_VERSION}"
 
 LYRIC_LINE_SPACING = 18
@@ -77,4 +81,3 @@ COLORS = {
     "inactive": "#64748b",
     "danger": "#f87171",
 }
-

@@ -61,3 +61,14 @@ class LyricsCache:
             except OSError:
                 pass
 
+    def delete(self, key: str) -> None:
+        with self._lock:
+            self._load()
+            if key not in self._cache:
+                return
+
+            self._cache.pop(key, None)
+            try:
+                self._flush()
+            except OSError:
+                pass

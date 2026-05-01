@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from difflib import SequenceMatcher
 from typing import Any
@@ -11,6 +12,7 @@ from app.models import LyricsResult, SongInfo
 from app.services.cache_service import LyricsCache
 from app.services.song_normalizer import clean_song_title, extract_song_candidates
 from app.utils.lrc_parser import parse_lrc, plain_text_to_lines
+from app.utils.text_codec import repair_text
 
 
 class LyricsService:
@@ -50,16 +52,16 @@ class LyricsService:
         return result, "network"
 
     def _fetch_from_network(self, song: SongInfo) -> LyricsResult | None:
-        all_results: dict[int, dict[str, Any]] = {}
+        all_results: dict[str, dict[str, Any]] = {}
 
         for candidate in self._build_search_candidates(song):
-            payload = self._search(candidate)
-            for item in payload:
-                try:
-                    item_id = int(item.get("id"))
-                except (TypeError, ValueError):
-                    continue
-                all_results[item_id] = item
+            for item in self._search(candidate):
+                self._merge_result(all_results, item)
+
+        for candidate in self._build_exact_candidates(song):
+            item = self._get_exact_match(candidate)
+            if item:
+                self._merge_result(all_results, item)
 
         if not all_results:
             return None
@@ -70,9 +72,9 @@ class LyricsService:
             reverse=True,
         )
 
-        best_match = ranked[0]
-        synced_lyrics = best_match.get("syncedLyrics") or ""
-        plain_lyrics = best_match.get("plainLyrics") or ""
+        best_match = self._normalize_result_item(ranked[0])
+        synced_lyrics = str(best_match.get("syncedLyrics") or "")
+        plain_lyrics = str(best_match.get("plainLyrics") or "")
         instrumental = bool(best_match.get("instrumental", False))
 
         if instrumental and not synced_lyrics and not plain_lyrics:
@@ -89,20 +91,62 @@ class LyricsService:
             return None
 
         return LyricsResult(
-            track_name=str(best_match.get("trackName", "") or song.track),
-            artist_name=str(best_match.get("artistName", "") or song.artist),
-            album_name=str(best_match.get("albumName", "") or song.album),
+            track_name=repair_text(str(best_match.get("trackName", "") or song.track)),
+            artist_name=repair_text(str(best_match.get("artistName", "") or song.artist)),
+            album_name=repair_text(str(best_match.get("albumName", "") or song.album)),
             source="lrclib",
             synced=synced,
             instrumental=instrumental,
-            plain_lyrics=plain_lyrics,
+            plain_lyrics=repair_text(plain_lyrics),
             fetched_at=time.time(),
             lines=lines,
         )
 
     def _build_search_candidates(self, song: SongInfo) -> list[dict[str, str]]:
         candidates: list[dict[str, str]] = []
-        seen: set[tuple[str, str, str]] = set()
+        seen: set[tuple[tuple[str, str], ...]] = set()
+
+        def add(*, track: str = "", artist: str = "", album: str = "", query: str = "") -> None:
+            track_value = clean_song_title(track)
+            artist_value = clean_song_title(artist)
+            album_value = clean_song_title(album)
+            query_value = clean_song_title(query)
+            if not track_value and not query_value:
+                return
+            payload: dict[str, str] = {}
+            if query_value:
+                payload["q"] = query_value
+            if track_value:
+                payload["track_name"] = track_value
+            if artist_value:
+                payload["artist_name"] = artist_value
+            if album_value:
+                payload["album_name"] = album_value
+
+            key = tuple(sorted((name, value.lower()) for name, value in payload.items()))
+            if key in seen:
+                return
+            seen.add(key)
+            candidates.append(payload)
+
+        add(track=song.track, artist=song.artist, album=song.album)
+        add(track=song.query_text, artist=song.artist, album=song.album)
+        add(query=song.query_text)
+        add(query=song.track)
+
+        for track, artist in extract_song_candidates(song.query_text):
+            add(track=track, artist=artist, album=song.album)
+            add(query=f"{artist} {track}".strip())
+
+        return candidates
+
+    def _build_exact_candidates(self, song: SongInfo) -> list[dict[str, str | int]]:
+        if not song.duration_seconds:
+            return []
+
+        candidates: list[dict[str, str | int]] = []
+        seen: set[tuple[str, str, str, int]] = set()
+        duration = max(int(round(song.duration_seconds)), 1)
 
         def add(track: str, artist: str = "", album: str = "") -> None:
             track_value = clean_song_title(track)
@@ -110,41 +154,85 @@ class LyricsService:
             album_value = clean_song_title(album)
             if not track_value:
                 return
-            key = (track_value.lower(), artist_value.lower(), album_value.lower())
+
+            key = (
+                track_value.lower(),
+                artist_value.lower(),
+                album_value.lower(),
+                duration,
+            )
             if key in seen:
                 return
             seen.add(key)
-
-            payload = {"track_name": track_value}
-            if artist_value:
-                payload["artist_name"] = artist_value
-            if album_value:
-                payload["album_name"] = album_value
-            candidates.append(payload)
+            candidates.append(
+                {
+                    "track_name": track_value,
+                    "artist_name": artist_value,
+                    "album_name": album_value,
+                    "duration": duration,
+                }
+            )
 
         add(song.track, song.artist, song.album)
         add(song.query_text, song.artist, song.album)
-
         for track, artist in extract_song_candidates(song.query_text):
             add(track, artist, song.album)
 
         return candidates
 
     def _search(self, params: dict[str, str]) -> list[dict[str, Any]]:
-        response = requests.get(
-            config.LRCLIB_SEARCH_URL,
-            headers=self.headers,
-            params=params,
-            timeout=config.HTTP_TIMEOUT_SECONDS,
-        )
-        response.raise_for_status()
-        payload = response.json()
+        payload = self._request_json(config.LRCLIB_SEARCH_URL, params)
 
         if isinstance(payload, list):
             return [item for item in payload if isinstance(item, dict)]
         if isinstance(payload, dict) and payload.get("trackName"):
             return [payload]
         return []
+
+    def _get_exact_match(self, params: dict[str, str | int]) -> dict[str, Any] | None:
+        try:
+            payload = self._request_json(config.LRCLIB_GET_URL, params)
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                return None
+            raise
+
+        if isinstance(payload, dict) and payload.get("trackName"):
+            return payload
+        return None
+
+    def _request_json(self, url: str, params: dict[str, str | int]) -> Any:
+        response = requests.get(
+            url,
+            headers=self.headers,
+            params=params,
+            timeout=config.HTTP_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+
+        try:
+            return json.loads(response.content.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return response.json()
+
+    def _merge_result(self, all_results: dict[str, dict[str, Any]], item: dict[str, Any]) -> None:
+        normalized = self._normalize_result_item(item)
+        item_key = str(normalized.get("id") or self._result_fingerprint(normalized))
+        all_results[item_key] = normalized
+
+    def _normalize_result_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(item)
+        for field in ("trackName", "artistName", "albumName", "plainLyrics", "syncedLyrics"):
+            value = normalized.get(field)
+            if isinstance(value, str):
+                normalized[field] = repair_text(value)
+        return normalized
+
+    def _result_fingerprint(self, item: dict[str, Any]) -> str:
+        track_name = clean_song_title(str(item.get("trackName", "") or ""))
+        artist_name = clean_song_title(str(item.get("artistName", "") or ""))
+        album_name = clean_song_title(str(item.get("albumName", "") or ""))
+        return f"{track_name}|{artist_name}|{album_name}"
 
     def _score_result(self, item: dict[str, Any], song: SongInfo) -> float:
         track_name = clean_song_title(str(item.get("trackName", "") or ""))
@@ -182,4 +270,3 @@ class LyricsService:
         if not left_value or not right_value:
             return 0.0
         return SequenceMatcher(None, left_value, right_value).ratio()
-

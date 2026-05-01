@@ -4,6 +4,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+from collections.abc import Callable
 
 import customtkinter as ctk
 
@@ -12,6 +13,7 @@ from app.models import LyricsResult, SongInfo
 from app.services.browser_watcher import BrowserWatcher
 from app.services.cache_service import LyricsCache
 from app.services.lyrics_service import LyricsService
+from app.services.translation_service import LyricsTranslationService
 from app.utils.windows_effects import apply_window_effects
 
 
@@ -37,10 +39,16 @@ class LyricsOverlayApp(ctk.CTk):
         self.event_queue: queue.Queue[dict] = queue.Queue()
         self.browser_watcher = BrowserWatcher(self.event_queue.put)
         self.cache = LyricsCache(config.CACHE_FILE)
+        self.translation_cache = LyricsCache(config.TRANSLATION_CACHE_FILE)
         self.lyrics_service = LyricsService(self.cache)
+        self.translation_service = LyricsTranslationService(self.translation_cache)
 
         self.current_song: SongInfo | None = None
+        self.original_lyrics: LyricsResult | None = None
+        self.original_lyrics_source = ""
         self.current_lyrics: LyricsResult | None = None
+        self.current_lyrics_source = ""
+        self.current_lyrics_is_translation = False
         self.last_requested_key = ""
         self.last_seen_song_at = 0.0
         self.playback_anchor_position = 0.0
@@ -49,6 +57,8 @@ class LyricsOverlayApp(ctk.CTk):
         self.current_offset = 0.0
         self.line_items: list[dict] = []
         self.line_width = 0
+        self.language_mode = "original"
+        self.text_only_mode = False
         self.empty_state: tuple[str, str] = (
             "Buka YouTube Music atau YouTube di Chrome / Edge",
             "Aplikasi akan auto detect lagu dan mencari lirik secara otomatis.",
@@ -68,6 +78,8 @@ class LyricsOverlayApp(ctk.CTk):
         self._bind_events()
         self._set_status("Menunggu browser...", detection="idle")
         self._render_empty_state(*self.empty_state)
+        self._update_language_button()
+        self._update_view_button()
 
         self.after(120, self._enable_window_effects)
         self.after(config.QUEUE_POLL_MS, self._pump_events)
@@ -134,7 +146,28 @@ class LyricsOverlayApp(ctk.CTk):
             padx=12,
             pady=6,
         )
-        self.status_badge.pack(side="left", padx=(0, 10))
+        self.status_badge.pack(side="left", padx=(0, 8))
+
+        self.refresh_button = self._build_header_button(
+            text="Refresh",
+            width=76,
+            command=self._reload_current_song,
+        )
+        self.refresh_button.pack(side="left", padx=(0, 8))
+
+        self.language_button = self._build_header_button(
+            text="Terjemah ID",
+            width=96,
+            command=self._toggle_language_mode,
+        )
+        self.language_button.pack(side="left", padx=(0, 8))
+
+        self.view_button = self._build_header_button(
+            text="Text Only",
+            width=86,
+            command=self._toggle_text_only_mode,
+        )
+        self.view_button.pack(side="left", padx=(0, 10))
 
         self.opacity_label = ctk.CTkLabel(
             self.controls,
@@ -149,7 +182,7 @@ class LyricsOverlayApp(ctk.CTk):
             from_=0.45,
             to=1.0,
             number_of_steps=11,
-            width=120,
+            width=100,
             command=self._on_opacity_change,
             button_color=config.COLORS["accent"],
             progress_color=config.COLORS["accent_soft"],
@@ -160,7 +193,7 @@ class LyricsOverlayApp(ctk.CTk):
 
         self.close_button = ctk.CTkButton(
             self.controls,
-            text="×",
+            text="X",
             width=34,
             height=34,
             command=self.close,
@@ -168,7 +201,7 @@ class LyricsOverlayApp(ctk.CTk):
             fg_color="#26171b",
             hover_color="#3d1e25",
             text_color="#fda4af",
-            font=("Segoe UI Variable", 18, "bold"),
+            font=("Segoe UI Variable", 14, "bold"),
         )
         self.close_button.pack(side="left")
 
@@ -192,22 +225,47 @@ class LyricsOverlayApp(ctk.CTk):
 
         self.resize_grip = ctk.CTkLabel(
             self.shell,
-            text="◢",
-            font=("Segoe UI Symbol", 14),
+            text="//",
+            font=("Consolas", 11, "bold"),
             text_color=config.COLORS["subtle"],
             fg_color="transparent",
         )
         self.resize_grip.place(relx=1.0, rely=1.0, anchor="se", x=-18, y=-12)
 
+    def _build_header_button(self, text: str, width: int, command: Callable[[], None]) -> ctk.CTkButton:
+        return ctk.CTkButton(
+            self.controls,
+            text=text,
+            width=width,
+            height=34,
+            command=command,
+            corner_radius=999,
+            fg_color="#1b2432",
+            hover_color="#243041",
+            text_color=config.COLORS["text"],
+            font=("Segoe UI Variable", 11, "bold"),
+        )
+
     def _bind_events(self) -> None:
-        drag_widgets = [self.header, self.title_frame, self.song_label, self.meta_label]
+        drag_widgets = [
+            self.header,
+            self.title_frame,
+            self.song_label,
+            self.meta_label,
+            self.content,
+            self.canvas,
+        ]
         for widget in drag_widgets:
             widget.bind("<ButtonPress-1>", self._start_move)
             widget.bind("<B1-Motion>", self._do_move)
 
         self.resize_grip.bind("<ButtonPress-1>", self._start_resize)
         self.resize_grip.bind("<B1-Motion>", self._do_resize)
+        self.canvas.bind("<Double-Button-1>", lambda _event: self._toggle_text_only_mode())
         self.bind("<Escape>", lambda _event: self.close())
+        self.bind("<Control-m>", lambda _event: self._toggle_text_only_mode())
+        self.bind("<Control-r>", lambda _event: self._reload_current_song())
+        self.bind("<Control-t>", lambda _event: self._toggle_language_mode())
         self.bind("<Configure>", self._handle_configure)
 
     def _enable_window_effects(self) -> None:
@@ -284,18 +342,25 @@ class LyricsOverlayApp(ctk.CTk):
                 self._handle_song_state(payload.get("song"))
             elif payload.get("type") == "lyrics_loaded":
                 self._handle_lyrics_loaded(payload)
+            elif payload.get("type") == "translation_loaded":
+                self._handle_translation_loaded(payload)
 
         self.after(config.QUEUE_POLL_MS, self._pump_events)
 
     def _handle_song_state(self, song: SongInfo | None) -> None:
         now = time.time()
+        current_key = self.current_song.cache_key() if self.current_song else ""
 
         if song is None:
             if self.current_song and now - self.last_seen_song_at < 5:
                 return
 
             self.current_song = None
+            self.original_lyrics = None
+            self.original_lyrics_source = ""
             self.current_lyrics = None
+            self.current_lyrics_source = ""
+            self.current_lyrics_is_translation = False
             self.active_index = -1
             self.line_items.clear()
             self.empty_state = (
@@ -307,31 +372,42 @@ class LyricsOverlayApp(ctk.CTk):
             self._refresh_target_opacity()
             return
 
-        self.last_seen_song_at = now
-        self.playback_anchor_position = max(song.position_seconds, 0.0)
-        self.playback_anchor_at = now
-
-        current_key = self.current_song.cache_key() if self.current_song else ""
         next_key = song.cache_key()
+        same_song = current_key == next_key and bool(next_key)
+
+        self.last_seen_song_at = now
+
+        if song.detection_method == "media_session":
+            self.playback_anchor_position = max(song.position_seconds, 0.0)
+            self.playback_anchor_at = now
+        elif not same_song:
+            # Fallback judul tab tidak punya posisi playback, jadi anchor hanya di-reset saat lagu berganti.
+            self.playback_anchor_position = 0.0
+            self.playback_anchor_at = now
+
         self.current_song = song
         self._refresh_target_opacity()
 
         self.song_label.configure(text=song.display_title)
 
         if song.detection_method == "media_session":
-            subtitle = "Windows Media Session aktif"
+            subtitle = "Sinkron dari Windows Media Session"
         else:
             subtitle = "Fallback judul tab browser"
         self.meta_label.configure(text=subtitle)
 
-        if current_key == next_key and self.current_lyrics:
-            self._set_status("Lirik aktif", detection=song.detection_method)
+        if same_song and self.current_lyrics:
+            self._refresh_current_status()
             return
 
-        if current_key == next_key and self.last_requested_key == next_key:
+        if same_song and self.last_requested_key == next_key:
             return
 
+        self.original_lyrics = None
+        self.original_lyrics_source = ""
         self.current_lyrics = None
+        self.current_lyrics_source = ""
+        self.current_lyrics_is_translation = False
         self.active_index = -1
         self._set_status("Mencari lirik...", detection=song.detection_method)
         self._render_empty_state(
@@ -357,6 +433,24 @@ class LyricsOverlayApp(ctk.CTk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _request_translation(self, lyrics: LyricsResult, song_key: str) -> None:
+        def worker() -> None:
+            result, source = self.translation_service.translate_lyrics(
+                lyrics,
+                target_language="id",
+            )
+            self.event_queue.put(
+                {
+                    "type": "translation_loaded",
+                    "song_key": song_key,
+                    "result": result,
+                    "source": source,
+                    "target_language": "id",
+                }
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _handle_lyrics_loaded(self, payload: dict) -> None:
         if not self.current_song:
             return
@@ -369,24 +463,79 @@ class LyricsOverlayApp(ctk.CTk):
         source = str(payload.get("source", ""))
 
         if result is None:
+            self.original_lyrics = None
             self.current_lyrics = None
+            self.current_lyrics_source = ""
+            self.current_lyrics_is_translation = False
             self.active_index = -1
             self._set_status("Lirik tidak ditemukan", detection=self.current_song.detection_method)
             self.empty_state = (
                 "Lirik tidak ditemukan",
-                source or "Coba ganti lagu lain atau biarkan aplikasi mendeteksi ulang saat track berganti.",
+                source or "Coba ganti lagu lain atau tekan Refresh untuk mencoba lagi.",
             )
             self._render_empty_state(*self.empty_state)
             return
 
-        self.current_lyrics = result
-        self.song_label.configure(text=result.display_title)
+        self.original_lyrics = result
+        self.original_lyrics_source = source
 
-        badge = "Synced" if result.synced else "Plain lyrics"
-        if source == "cache":
+        if self.language_mode == "id":
+            self._show_lyrics(result, source=source, translated=False)
+            self._set_status("Menerjemahkan ID...", detection=self.current_song.detection_method)
+            self._request_translation(result, song_key)
+            return
+
+        self._show_lyrics(result, source=source, translated=False)
+
+    def _handle_translation_loaded(self, payload: dict) -> None:
+        if not self.current_song:
+            return
+
+        song_key = payload.get("song_key")
+        if song_key != self.current_song.cache_key():
+            return
+
+        if payload.get("target_language") != "id":
+            return
+
+        result = payload.get("result")
+        source = str(payload.get("source", ""))
+
+        if result is None:
+            self.language_mode = "original"
+            self._update_language_button()
+            if self.original_lyrics:
+                self._show_lyrics(self.original_lyrics, source=self.original_lyrics_source or "network", translated=False)
+            self._set_status("Terjemah gagal", detection=self.current_song.detection_method)
+            return
+
+        if self.language_mode != "id":
+            return
+
+        self._show_lyrics(result, source=source, translated=True)
+
+    def _show_lyrics(self, lyrics: LyricsResult, *, source: str, translated: bool) -> None:
+        self.current_lyrics = lyrics
+        self.current_lyrics_source = source
+        self.current_lyrics_is_translation = translated
+        self.song_label.configure(text=lyrics.display_title)
+        self._refresh_current_status()
+        self._render_lyrics(lyrics)
+
+    def _refresh_current_status(self) -> None:
+        if not self.current_song or not self.current_lyrics:
+            return
+
+        if self.current_lyrics_is_translation:
+            badge = "Lirik ID"
+        elif self.current_lyrics.synced:
+            badge = "Sinkron"
+        else:
+            badge = "Teks"
+
+        if self.current_lyrics_source == "cache":
             badge = f"{badge} • cache"
         self._set_status(badge, detection=self.current_song.detection_method)
-        self._render_lyrics(result)
 
     def _set_status(self, text: str, detection: str) -> None:
         badge_colors = {
@@ -495,13 +644,14 @@ class LyricsOverlayApp(ctk.CTk):
             self.active_index = next_active
             self._apply_line_styles()
 
+        next_line_width = max(260, canvas_width - 90)
         for item in self.line_items:
             item_id = item["id"]
             self.canvas.coords(item_id, canvas_width / 2, item["base_y"] + self.current_offset)
-            if self.line_width != max(260, canvas_width - 90):
-                self.canvas.itemconfigure(item_id, width=max(260, canvas_width - 90))
+            if self.line_width != next_line_width:
+                self.canvas.itemconfigure(item_id, width=next_line_width)
 
-        self.line_width = max(260, canvas_width - 90)
+        self.line_width = next_line_width
 
     def _apply_line_styles(self) -> None:
         for item in self.line_items:
@@ -555,6 +705,98 @@ class LyricsOverlayApp(ctk.CTk):
             return len(lines) - 1
         return -1
 
+    def _reload_current_song(self) -> None:
+        if not self.current_song:
+            return
+
+        song = self.current_song
+        self.cache.delete(song.cache_key())
+        self.last_requested_key = ""
+        self.original_lyrics = None
+        self.original_lyrics_source = ""
+        self.current_lyrics = None
+        self.current_lyrics_source = ""
+        self.current_lyrics_is_translation = False
+        self.active_index = -1
+        self._set_status("Refresh lirik...", detection=song.detection_method)
+        self._render_empty_state(
+            "Memuat ulang lirik...",
+            f"Mencocokkan ulang lagu: {song.display_title}",
+        )
+        self._request_lyrics(song)
+
+    def _toggle_language_mode(self) -> None:
+        if self.language_mode == "id":
+            self.language_mode = "original"
+            self._update_language_button()
+            if self.original_lyrics:
+                self._show_lyrics(self.original_lyrics, source=self.original_lyrics_source or "network", translated=False)
+            return
+
+        self.language_mode = "id"
+        self._update_language_button()
+        if not self.original_lyrics or not self.current_song:
+            return
+
+        self._set_status("Menerjemahkan ID...", detection=self.current_song.detection_method)
+        self._request_translation(self.original_lyrics, self.current_song.cache_key())
+
+    def _update_language_button(self) -> None:
+        if self.language_mode == "id":
+            self.language_button.configure(
+                text="Teks Asli",
+                fg_color="#1d3b2a",
+                hover_color="#285238",
+            )
+        else:
+            self.language_button.configure(
+                text="Terjemah ID",
+                fg_color="#1b2432",
+                hover_color="#243041",
+            )
+
+    def _toggle_text_only_mode(self) -> None:
+        self.text_only_mode = not self.text_only_mode
+        if self.text_only_mode:
+            self.header.grid_remove()
+            self.resize_grip.place_forget()
+            self.shell.configure(
+                fg_color="#0b1017",
+                border_width=0,
+                border_color="#0b1017",
+                corner_radius=24,
+            )
+            self.shell.grid_configure(padx=8, pady=8)
+            self.content.grid_configure(padx=8, pady=8)
+        else:
+            self.header.grid()
+            self.resize_grip.place(relx=1.0, rely=1.0, anchor="se", x=-18, y=-12)
+            self.shell.configure(
+                fg_color=config.COLORS["panel"],
+                border_width=1,
+                border_color=config.COLORS["panel_border"],
+                corner_radius=28,
+            )
+            self.shell.grid_configure(padx=18, pady=18)
+            self.content.grid_configure(padx=16, pady=(0, 16))
+
+        self._update_view_button()
+        self._rerender_after_resize()
+
+    def _update_view_button(self) -> None:
+        if self.text_only_mode:
+            self.view_button.configure(
+                text="Normal",
+                fg_color="#1d3b2a",
+                hover_color="#285238",
+            )
+        else:
+            self.view_button.configure(
+                text="Text Only",
+                fg_color="#1b2432",
+                hover_color="#243041",
+            )
+
     def _handle_configure(self, _event: tk.Event) -> None:
         current_size = (self.winfo_width(), self.winfo_height())
         if current_size == self._last_size:
@@ -580,4 +822,3 @@ class LyricsOverlayApp(ctk.CTk):
 
     def run(self) -> None:
         self.mainloop()
-

@@ -4,6 +4,8 @@ import hashlib
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from app.utils.text_codec import repair_text
+
 
 def _compact(value: str) -> str:
     return " ".join(value.lower().strip().split())
@@ -51,7 +53,7 @@ class LyricLine:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "LyricLine":
         return cls(
-            text=payload.get("text", ""),
+            text=repair_text(str(payload.get("text", "") or "")),
             start_time=payload.get("start_time"),
             end_time=payload.get("end_time"),
         )
@@ -84,14 +86,13 @@ class LyricsResult:
     def from_dict(cls, payload: dict[str, Any]) -> "LyricsResult":
         lines = [LyricLine.from_dict(item) for item in payload.get("lines", [])]
         return cls(
-            track_name=payload.get("track_name", ""),
-            artist_name=payload.get("artist_name", ""),
-            album_name=payload.get("album_name", ""),
-            source=payload.get("source", "cache"),
+            track_name=repair_text(str(payload.get("track_name", "") or "")),
+            artist_name=repair_text(str(payload.get("artist_name", "") or "")),
+            album_name=repair_text(str(payload.get("album_name", "") or "")),
+            source=str(payload.get("source", "cache") or "cache"),
             synced=bool(payload.get("synced", False)),
             instrumental=bool(payload.get("instrumental", False)),
-            plain_lyrics=payload.get("plain_lyrics", ""),
+            plain_lyrics=repair_text(str(payload.get("plain_lyrics", "") or "")),
             fetched_at=float(payload.get("fetched_at", 0.0)),
             lines=lines,
         )
-
