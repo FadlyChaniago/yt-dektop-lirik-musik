@@ -56,8 +56,7 @@ class LyricsOverlayApp(ctk.CTk):
         self.playback_anchor_at = time.time()
         self.active_index = -1
         self.current_offset = 0.0
-        self.manual_scroll_offset = 0.0
-        self.manual_scroll_until = 0.0
+        self.follow_live = True
         self.line_items: list[dict] = []
         self.line_width = 0
         self.language_mode = "original"
@@ -175,6 +174,13 @@ class LyricsOverlayApp(ctk.CTk):
             command=self._toggle_text_only_mode,
         )
         self.view_button.pack(side="left", padx=(0, 10))
+
+        self.live_button = self._build_header_button(
+            text="Live On",
+            width=74,
+            command=self._toggle_live_follow,
+        )
+        self.live_button.pack(side="left", padx=(0, 10))
 
         self.opacity_label = ctk.CTkLabel(
             self.controls,
@@ -316,6 +322,7 @@ class LyricsOverlayApp(ctk.CTk):
         self.canvas.bind("<Double-Button-1>", lambda _event: self._toggle_text_only_mode())
         self.bind("<Escape>", lambda _event: self.close())
         self.bind("<Control-m>", lambda _event: self._toggle_text_only_mode())
+        self.bind("<Control-l>", lambda _event: self._toggle_live_follow())
         self.bind("<Control-r>", lambda _event: self._reload_current_song())
         self.bind("<Control-t>", lambda _event: self._toggle_language_mode())
         self.bind("<Control-w>", lambda _event: self._toggle_maximize())
@@ -378,10 +385,10 @@ class LyricsOverlayApp(ctk.CTk):
         if not delta:
             return None
 
-        self.manual_scroll_offset += (delta / 120.0) * 42.0
-        self.manual_scroll_offset = max(min(self.manual_scroll_offset, 520.0), -520.0)
-        self.manual_scroll_until = time.time() + 4.0
-        self._update_karaoke_frame(force=True)
+        self.follow_live = False
+        self._update_live_button()
+        self.current_offset += (delta / 120.0) * 42.0
+        self._reposition_line_items()
         return "break"
 
     def _refresh_target_opacity(self) -> None:
@@ -443,6 +450,8 @@ class LyricsOverlayApp(ctk.CTk):
             self.current_lyrics_is_translation = False
             self.active_index = -1
             self.line_items.clear()
+            self.follow_live = False
+            self._update_live_button()
             self.empty_state = (
                 "Buka YouTube Music atau YouTube di Chrome / Edge",
                 "Jika lagu sudah terbuka tapi belum terdeteksi, pastikan browser menampilkan metadata media.",
@@ -454,11 +463,16 @@ class LyricsOverlayApp(ctk.CTk):
 
         next_key = song.cache_key()
         same_song = current_key == next_key and bool(next_key)
+        expected_position = self._get_estimated_anchor_position(now)
 
         self.last_seen_song_at = now
 
         if song.detection_method == "media_session":
-            self.playback_anchor_position = max(song.position_seconds, 0.0)
+            self.playback_anchor_position = self._resolve_media_session_position(
+                song=song,
+                same_song=same_song,
+                expected_position=expected_position,
+            )
             self.playback_anchor_at = now
         elif not same_song:
             # Fallback judul tab tidak punya posisi playback, jadi anchor hanya di-reset saat lagu berganti.
@@ -489,6 +503,8 @@ class LyricsOverlayApp(ctk.CTk):
         self.current_lyrics_source = ""
         self.current_lyrics_is_translation = False
         self.active_index = -1
+        self.follow_live = False
+        self._update_live_button()
         self._set_status("Mencari lirik...", detection=song.detection_method)
         self._render_empty_state(
             "Mencari lirik...",
@@ -548,6 +564,8 @@ class LyricsOverlayApp(ctk.CTk):
             self.current_lyrics_source = ""
             self.current_lyrics_is_translation = False
             self.active_index = -1
+            self.follow_live = False
+            self._update_live_button()
             self._set_status("Lirik tidak ditemukan", detection=self.current_song.detection_method)
             self.empty_state = (
                 "Lirik tidak ditemukan",
@@ -598,7 +616,9 @@ class LyricsOverlayApp(ctk.CTk):
         self.current_lyrics = lyrics
         self.current_lyrics_source = source
         self.current_lyrics_is_translation = translated
+        self.follow_live = lyrics.has_timing
         self.song_label.configure(text=lyrics.display_title)
+        self._update_live_button()
         self._refresh_current_status()
         self._render_lyrics(lyrics)
 
@@ -661,8 +681,6 @@ class LyricsOverlayApp(ctk.CTk):
         self.line_items.clear()
         self.active_index = -1
         self.current_offset = 0.0
-        self.manual_scroll_offset = 0.0
-        self.manual_scroll_until = 0.0
 
         width = self.canvas.winfo_width()
         height = self.canvas.winfo_height()
@@ -720,27 +738,30 @@ class LyricsOverlayApp(ctk.CTk):
         if target_index >= len(self.line_items):
             target_index = len(self.line_items) - 1
 
-        base_y = self.line_items[target_index]["base_y"]
-        desired_offset = (canvas_height * 0.42) - base_y
-
-        if time.time() <= self.manual_scroll_until:
-            desired_offset += self.manual_scroll_offset
-        else:
-            self.manual_scroll_offset *= 0.84
-            if abs(self.manual_scroll_offset) < 1.0:
-                self.manual_scroll_offset = 0.0
-            desired_offset += self.manual_scroll_offset
-
-        self.current_offset += (desired_offset - self.current_offset) * 0.18
+        if self.current_lyrics.has_timing and self.follow_live:
+            base_y = self.line_items[target_index]["base_y"]
+            desired_offset = (canvas_height * 0.42) - base_y
+            self.current_offset += (desired_offset - self.current_offset) * 0.18
 
         if force or next_active != self.active_index:
             self.active_index = next_active
             self._apply_line_styles()
 
-        next_line_width = max(260, canvas_width - 90)
+        self._reposition_line_items(canvas_width)
+
+    def _reposition_line_items(self, canvas_width: int | None = None) -> None:
+        if not self.line_items:
+            return
+
+        target_width = canvas_width if canvas_width is not None else max(
+            self.canvas.winfo_width(),
+            config.MIN_WINDOW_WIDTH,
+        )
+        next_line_width = max(260, target_width - 90)
+
         for item in self.line_items:
             item_id = item["id"]
-            self.canvas.coords(item_id, canvas_width / 2, item["base_y"] + self.current_offset)
+            self.canvas.coords(item_id, target_width / 2, item["base_y"] + self.current_offset)
             if self.line_width != next_line_width:
                 self.canvas.itemconfigure(item_id, width=next_line_width)
 
@@ -781,22 +802,68 @@ class LyricsOverlayApp(ctk.CTk):
             return min(position, self.current_song.duration_seconds)
         return position
 
+    def _get_estimated_anchor_position(self, now: float) -> float:
+        if not self.current_song:
+            return 0.0
+
+        if not self.current_song.is_playing:
+            return self.playback_anchor_position
+
+        elapsed = max(0.0, now - self.playback_anchor_at)
+        estimated = self.playback_anchor_position + elapsed
+        if self.current_song.duration_seconds:
+            return min(estimated, self.current_song.duration_seconds)
+        return estimated
+
+    def _resolve_media_session_position(
+        self,
+        *,
+        song: SongInfo,
+        same_song: bool,
+        expected_position: float,
+    ) -> float:
+        reported_position = max(song.position_seconds, 0.0)
+        if not same_song:
+            return reported_position
+
+        if not song.is_playing:
+            return reported_position
+
+        # Beberapa browser kadang mengirim posisi 0 / mundur sebentar walau lagu sedang jalan.
+        if expected_position >= 12.0 and reported_position <= 1.0:
+            return expected_position
+
+        if reported_position + 3.5 < expected_position:
+            return expected_position
+
+        return reported_position
+
     def _find_active_index(self, position_seconds: float) -> int:
         if not self.current_lyrics:
             return -1
 
         lines = self.current_lyrics.lines
+        first_timed_index = -1
+        last_started_index = -1
+
         for index, line in enumerate(lines):
             if line.start_time is None:
                 continue
 
+            if first_timed_index == -1:
+                first_timed_index = index
+
+            if position_seconds < line.start_time:
+                if last_started_index != -1:
+                    return last_started_index
+                return first_timed_index
+
+            last_started_index = index
             end_time = line.end_time if line.end_time is not None else line.start_time + 4.5
             if line.start_time <= position_seconds < end_time:
                 return index
 
-        if lines and lines[-1].start_time is not None and position_seconds >= lines[-1].start_time:
-            return len(lines) - 1
-        return -1
+        return last_started_index
 
     def _reload_current_song(self) -> None:
         if not self.current_song:
@@ -811,6 +878,8 @@ class LyricsOverlayApp(ctk.CTk):
         self.current_lyrics_source = ""
         self.current_lyrics_is_translation = False
         self.active_index = -1
+        self.follow_live = False
+        self._update_live_button()
         self._set_status("Refresh lirik...", detection=song.detection_method)
         self._render_empty_state(
             "Memuat ulang lirik...",
@@ -878,6 +947,40 @@ class LyricsOverlayApp(ctk.CTk):
 
         self._set_status("Menerjemahkan ID...", detection=self.current_song.detection_method)
         self._request_translation(self.original_lyrics, self.current_song.cache_key())
+
+    def _toggle_live_follow(self) -> None:
+        if not self.current_lyrics or not self.current_lyrics.has_timing:
+            return
+
+        self.follow_live = not self.follow_live
+        self._update_live_button()
+        if self.follow_live:
+            self._update_karaoke_frame(force=True)
+
+    def _update_live_button(self) -> None:
+        if not self.current_lyrics or not self.current_lyrics.has_timing:
+            self.live_button.configure(
+                text="Live Off",
+                fg_color="#273041",
+                hover_color="#273041",
+                text_color=config.COLORS["subtle"],
+            )
+            return
+
+        if self.follow_live:
+            self.live_button.configure(
+                text="Live On",
+                fg_color="#1d3b2a",
+                hover_color="#285238",
+                text_color=config.COLORS["text"],
+            )
+        else:
+            self.live_button.configure(
+                text="Live Off",
+                fg_color="#3a2418",
+                hover_color="#4d2f1f",
+                text_color=config.COLORS["text"],
+            )
 
     def _update_language_button(self) -> None:
         if self.language_mode == "id":

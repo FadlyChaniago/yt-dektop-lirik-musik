@@ -84,8 +84,11 @@ class MediaSessionReader:
             if not title:
                 continue
 
-            position_seconds = _seconds_from_duration(getattr(timeline, "position", None))
-            duration_seconds = _seconds_from_duration(getattr(timeline, "end_time", None))
+            start_seconds = _seconds_from_duration(getattr(timeline, "start_time", None))
+            end_seconds = _seconds_from_duration(getattr(timeline, "end_time", None))
+            raw_position_seconds = _seconds_from_duration(getattr(timeline, "position", None))
+            position_seconds = max(raw_position_seconds - start_seconds, 0.0)
+            duration_seconds = max(end_seconds - start_seconds, 0.0)
             status_text = _read_enum_name(getattr(playback, "playback_status", None)).lower()
             is_playing = "playing" in status_text or not status_text
 
@@ -127,4 +130,3 @@ class MediaSessionReader:
             return asyncio.run(self._get_song_async())
         except Exception:
             return None
-
