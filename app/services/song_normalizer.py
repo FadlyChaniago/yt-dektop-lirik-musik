@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable
+from collections.abc import Iterable
 
 from app import config
 from app.models import SongInfo
@@ -10,7 +10,12 @@ from app.utils.text_codec import repair_text
 
 FEATURE_ARTIST_RE = re.compile(r"\b(?:feat\.?|ft\.?|featuring)\b", re.IGNORECASE)
 SEPARATOR_RE = re.compile(r"\s*(?:-|–|—|:|/|\|)\s*")
-QUOTE_RE = re.compile(r'^[\'"“”‘’]+|[\'"“”‘’]+$')
+QUOTE_RE = re.compile(r"^[\'\"“”‘’]+|[\'\"“”‘’]+$")
+LEADING_INDEX_RE = re.compile(r"^[\(\[]?\d{1,4}[\)\]]?\s*")
+KNOWN_SUFFIX_RE = re.compile(
+    r"\s*-\s*(?:youtube(?:\s+music)?|the first take|colors show|lyric video)$",
+    re.IGNORECASE,
+)
 
 
 def compact_spaces(value: str) -> str:
@@ -35,16 +40,16 @@ def strip_browser_suffix(title: str) -> str:
 
 def clean_song_title(value: str) -> str:
     cleaned = repair_text(strip_browser_suffix(value))
-    cleaned = cleaned.replace("â€¢", " - ")
     cleaned = cleaned.replace("•", " - ")
     cleaned = cleaned.replace("|", " - ")
     cleaned = cleaned.replace("_", " ")
+    cleaned = LEADING_INDEX_RE.sub("", cleaned)
 
     for pattern in config.NOISE_PATTERNS:
         cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
 
     cleaned = re.sub(r"\s*-\s*topic$", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s*-\s*youtube(?:\s+music)?$", "", cleaned, flags=re.IGNORECASE)
+    cleaned = KNOWN_SUFFIX_RE.sub("", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned)
     cleaned = cleaned.strip(" -")
     return compact_spaces(cleaned)

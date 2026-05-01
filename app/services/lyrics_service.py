@@ -35,7 +35,7 @@ class LyricsService:
         try:
             result = self._fetch_from_network(song)
         except requests.RequestException as exc:
-            return None, f"Gagal mengambil lirik: {exc}"
+            return None, self._format_network_error(exc)
 
         if result is None:
             self.cache.set(
@@ -57,20 +57,38 @@ class LyricsService:
 
     def _fetch_from_network(self, song: SongInfo) -> LyricsResult | None:
         all_results: dict[str, dict[str, Any]] = {}
+        request_errors: list[requests.RequestException] = []
 
         for candidate in self._build_search_candidates(song):
-            for item in self._search(candidate):
-                self._merge_result(all_results, item)
+            try:
+                for item in self._search(candidate):
+                    self._merge_result(all_results, item)
+            except requests.RequestException as exc:
+                request_errors.append(exc)
 
         for candidate in self._build_exact_candidates(song):
-            item = self._get_exact_match(candidate)
+            try:
+                item = self._get_exact_match(candidate)
+            except requests.RequestException as exc:
+                request_errors.append(exc)
+                continue
+
             if item:
                 self._merge_result(all_results, item)
 
         if not all_results:
-            return self._fetch_from_lyrics_ovh(song)
+            try:
+                fallback_result = self._fetch_from_lyrics_ovh(song)
+            except requests.RequestException as exc:
+                request_errors.append(exc)
+                fallback_result = None
+
+            if fallback_result is not None:
+                return fallback_result
 
         if not all_results:
+            if request_errors:
+                raise request_errors[-1]
             return None
 
         ranked = sorted(
@@ -163,7 +181,7 @@ class LyricsService:
             track_value = clean_song_title(track)
             artist_value = clean_song_title(artist)
             album_value = clean_song_title(album)
-            if not track_value:
+            if not track_value or not artist_value:
                 return
 
             key = (
@@ -175,18 +193,20 @@ class LyricsService:
             if key in seen:
                 return
             seen.add(key)
-            candidates.append(
-                {
-                    "track_name": track_value,
-                    "artist_name": artist_value,
-                    "album_name": album_value,
-                    "duration": duration,
-                }
-            )
+            payload: dict[str, str | int] = {
+                "track_name": track_value,
+                "artist_name": artist_value,
+                "duration": duration,
+            }
+            if album_value:
+                payload["album_name"] = album_value
+            candidates.append(payload)
 
         add(song.track, song.artist, song.album)
         add(song.query_text, song.artist, song.album)
-        for track, artist in build_song_queries(song):
+
+        artist_queries = [(track, artist) for track, artist in build_song_queries(song) if artist]
+        for track, artist in artist_queries[:1]:
             add(track, artist, song.album)
 
         return candidates
@@ -240,7 +260,12 @@ class LyricsService:
         return lyrics
 
     def _search(self, params: dict[str, str]) -> list[dict[str, Any]]:
-        payload = self._request_json(config.LRCLIB_SEARCH_URL, params)
+        try:
+            payload = self._request_json(config.LRCLIB_SEARCH_URL, params)
+        except requests.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code in {400, 404}:
+                return []
+            raise
 
         if isinstance(payload, list):
             return [item for item in payload if isinstance(item, dict)]
@@ -252,7 +277,7 @@ class LyricsService:
         try:
             payload = self._request_json(config.LRCLIB_GET_URL, params)
         except requests.HTTPError as exc:
-            if exc.response is not None and exc.response.status_code == 404:
+            if exc.response is not None and exc.response.status_code in {400, 404}:
                 return None
             raise
 
@@ -347,6 +372,22 @@ class LyricsService:
             return json.loads(response.content.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             return response.json()
+
+    @staticmethod
+    def _format_network_error(exc: requests.RequestException) -> str:
+        if isinstance(exc, requests.Timeout):
+            return "Request lirik timeout. Coba Refresh lagi."
+        if isinstance(exc, requests.ConnectionError):
+            return "Koneksi ke layanan lirik gagal. Coba cek internet lalu Refresh."
+
+        if isinstance(exc, requests.HTTPError) and exc.response is not None:
+            status_code = exc.response.status_code
+            if status_code >= 500:
+                return "Layanan lirik sedang bermasalah. Coba lagi beberapa saat."
+            if status_code == 429:
+                return "Layanan lirik sedang rate limit. Coba lagi sebentar."
+
+        return "Gagal mengambil lirik dari provider. Coba Refresh atau ganti lagu."
 
     @staticmethod
     def _similarity(left: str, right: str) -> float:

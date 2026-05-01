@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import queue
 import threading
 import time
@@ -64,6 +65,9 @@ class LyricsOverlayApp(ctk.CTk):
             "Aplikasi akan auto detect lagu dan mencari lirik secara otomatis.",
         )
         self.closing = False
+        self.is_maximized = False
+        self.is_minimized = False
+        self.restore_geometry = self.geometry()
         self._move_origin: tuple[int, int] | None = None
         self._resize_origin: tuple[int, int, int, int] | None = None
         self._resize_after_id: str | None = None
@@ -80,6 +84,7 @@ class LyricsOverlayApp(ctk.CTk):
         self._render_empty_state(*self.empty_state)
         self._update_language_button()
         self._update_view_button()
+        self._update_maximize_button()
 
         self.after(120, self._enable_window_effects)
         self.after(config.QUEUE_POLL_MS, self._pump_events)
@@ -191,6 +196,26 @@ class LyricsOverlayApp(ctk.CTk):
         self.opacity_slider.set(config.DEFAULT_OPACITY)
         self.opacity_slider.pack(side="left", padx=(0, 10))
 
+        self.minimize_button = self._build_window_button(
+            text="-",
+            width=34,
+            command=self._minimize_window,
+            fg_color="#16202c",
+            hover_color="#223043",
+            text_color=config.COLORS["text"],
+        )
+        self.minimize_button.pack(side="left", padx=(0, 6))
+
+        self.maximize_button = self._build_window_button(
+            text="Max",
+            width=52,
+            command=self._toggle_maximize,
+            fg_color="#16202c",
+            hover_color="#223043",
+            text_color=config.COLORS["text"],
+        )
+        self.maximize_button.pack(side="left", padx=(0, 6))
+
         self.close_button = ctk.CTkButton(
             self.controls,
             text="X",
@@ -246,6 +271,29 @@ class LyricsOverlayApp(ctk.CTk):
             font=("Segoe UI Variable", 11, "bold"),
         )
 
+    def _build_window_button(
+        self,
+        text: str,
+        width: int,
+        command: Callable[[], None],
+        *,
+        fg_color: str,
+        hover_color: str,
+        text_color: str,
+    ) -> ctk.CTkButton:
+        return ctk.CTkButton(
+            self.controls,
+            text=text,
+            width=width,
+            height=34,
+            command=command,
+            corner_radius=999,
+            fg_color=fg_color,
+            hover_color=hover_color,
+            text_color=text_color,
+            font=("Segoe UI Variable", 11, "bold"),
+        )
+
     def _bind_events(self) -> None:
         drag_widgets = [
             self.header,
@@ -258,6 +306,7 @@ class LyricsOverlayApp(ctk.CTk):
         for widget in drag_widgets:
             widget.bind("<ButtonPress-1>", self._start_move)
             widget.bind("<B1-Motion>", self._do_move)
+            widget.bind("<Double-Button-1>", lambda _event: self._toggle_maximize())
 
         self.resize_grip.bind("<ButtonPress-1>", self._start_resize)
         self.resize_grip.bind("<B1-Motion>", self._do_resize)
@@ -266,12 +315,24 @@ class LyricsOverlayApp(ctk.CTk):
         self.bind("<Control-m>", lambda _event: self._toggle_text_only_mode())
         self.bind("<Control-r>", lambda _event: self._reload_current_song())
         self.bind("<Control-t>", lambda _event: self._toggle_language_mode())
+        self.bind("<Control-w>", lambda _event: self._toggle_maximize())
+        self.bind("<Unmap>", self._handle_unmap)
+        self.bind("<Map>", self._handle_map)
         self.bind("<Configure>", self._handle_configure)
 
     def _enable_window_effects(self) -> None:
         apply_window_effects(self)
 
     def _start_move(self, event: tk.Event) -> None:
+        if self.is_maximized:
+            pointer_ratio = event.x_root / max(self.winfo_width(), 1)
+            self._toggle_maximize()
+            restored_width = max(self.winfo_width(), config.MIN_WINDOW_WIDTH)
+            offset_x = int(restored_width * min(max(pointer_ratio, 0.15), 0.85))
+            self._move_origin = (offset_x, event.y_root - self.winfo_y())
+            self.geometry(f"+{event.x_root - offset_x}+{self.winfo_y()}")
+            return
+
         self._move_origin = (event.x_root - self.winfo_x(), event.y_root - self.winfo_y())
 
     def _do_move(self, event: tk.Event) -> None:
@@ -281,6 +342,8 @@ class LyricsOverlayApp(ctk.CTk):
         self.geometry(f"+{event.x_root - offset_x}+{event.y_root - offset_y}")
 
     def _start_resize(self, event: tk.Event) -> None:
+        if self.is_maximized:
+            return
         self._resize_origin = (
             event.x_root,
             event.y_root,
@@ -289,7 +352,7 @@ class LyricsOverlayApp(ctk.CTk):
         )
 
     def _do_resize(self, event: tk.Event) -> None:
-        if not self._resize_origin:
+        if not self._resize_origin or self.is_maximized:
             return
 
         start_x, start_y, start_width, start_height = self._resize_origin
@@ -534,7 +597,7 @@ class LyricsOverlayApp(ctk.CTk):
             badge = "Teks"
 
         if self.current_lyrics_source == "cache":
-            badge = f"{badge} • cache"
+            badge = f"{badge} (cache)"
         self._set_status(badge, detection=self.current_song.detection_method)
 
     def _set_status(self, text: str, detection: str) -> None:
@@ -725,6 +788,51 @@ class LyricsOverlayApp(ctk.CTk):
         )
         self._request_lyrics(song)
 
+    def _minimize_window(self) -> None:
+        if self.closing or self.is_minimized:
+            return
+
+        self.is_minimized = True
+        self.overrideredirect(False)
+        self.iconify()
+
+    def _toggle_maximize(self) -> None:
+        if self.is_minimized:
+            self.deiconify()
+            return
+
+        if self.is_maximized:
+            self.is_maximized = False
+            self.geometry(self.restore_geometry)
+        else:
+            self.restore_geometry = self.geometry()
+            self.geometry(self._get_maximized_geometry())
+            self.is_maximized = True
+
+        self._update_maximize_button()
+        self._rerender_after_resize()
+
+    def _update_maximize_button(self) -> None:
+        if self.is_maximized:
+            self.maximize_button.configure(text="Restore", width=68)
+        else:
+            self.maximize_button.configure(text="Max", width=52)
+
+    def _get_maximized_geometry(self) -> str:
+        try:
+            rect = ctypes.wintypes.RECT()  # type: ignore[attr-defined]
+            result = ctypes.windll.user32.SystemParametersInfoW(48, 0, ctypes.byref(rect), 0)
+            if result:
+                width = rect.right - rect.left
+                height = rect.bottom - rect.top
+                return f"{width}x{height}+{rect.left}+{rect.top}"
+        except Exception:
+            pass
+
+        width = self.winfo_screenwidth()
+        height = self.winfo_screenheight()
+        return f"{width}x{height}+0+0"
+
     def _toggle_language_mode(self) -> None:
         if self.language_mode == "id":
             self.language_mode = "original"
@@ -797,12 +905,28 @@ class LyricsOverlayApp(ctk.CTk):
                 hover_color="#243041",
             )
 
+    def _handle_unmap(self, _event: tk.Event) -> None:
+        if self.state() == "iconic":
+            self.is_minimized = True
+
+    def _handle_map(self, _event: tk.Event) -> None:
+        if self.is_minimized:
+            self.after(10, self._restore_after_minimize)
+
+    def _restore_after_minimize(self) -> None:
+        self.is_minimized = False
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+        self.after(60, self._enable_window_effects)
+
     def _handle_configure(self, _event: tk.Event) -> None:
         current_size = (self.winfo_width(), self.winfo_height())
         if current_size == self._last_size:
             return
 
         self._last_size = current_size
+        if not self.is_maximized and self.state() == "normal":
+            self.restore_geometry = self.geometry()
         if self._resize_after_id:
             self.after_cancel(self._resize_after_id)
         self._resize_after_id = self.after(120, self._rerender_after_resize)
