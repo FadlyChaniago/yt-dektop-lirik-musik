@@ -56,6 +56,8 @@ class LyricsOverlayApp(ctk.CTk):
         self.playback_anchor_at = time.time()
         self.active_index = -1
         self.current_offset = 0.0
+        self.manual_scroll_offset = 0.0
+        self.manual_scroll_until = 0.0
         self.line_items: list[dict] = []
         self.line_width = 0
         self.language_mode = "original"
@@ -307,6 +309,7 @@ class LyricsOverlayApp(ctk.CTk):
             widget.bind("<ButtonPress-1>", self._start_move)
             widget.bind("<B1-Motion>", self._do_move)
             widget.bind("<Double-Button-1>", lambda _event: self._toggle_maximize())
+            widget.bind("<MouseWheel>", self._on_mousewheel)
 
         self.resize_grip.bind("<ButtonPress-1>", self._start_resize)
         self.resize_grip.bind("<B1-Motion>", self._do_resize)
@@ -366,6 +369,20 @@ class LyricsOverlayApp(ctk.CTk):
     def _on_opacity_change(self, value: float) -> None:
         self.user_opacity = float(value)
         self._refresh_target_opacity()
+
+    def _on_mousewheel(self, event: tk.Event) -> str | None:
+        if not self.current_lyrics or not self.line_items:
+            return None
+
+        delta = getattr(event, "delta", 0)
+        if not delta:
+            return None
+
+        self.manual_scroll_offset += (delta / 120.0) * 42.0
+        self.manual_scroll_offset = max(min(self.manual_scroll_offset, 520.0), -520.0)
+        self.manual_scroll_until = time.time() + 4.0
+        self._update_karaoke_frame(force=True)
+        return "break"
 
     def _refresh_target_opacity(self) -> None:
         if self.closing:
@@ -591,8 +608,10 @@ class LyricsOverlayApp(ctk.CTk):
 
         if self.current_lyrics_is_translation:
             badge = "Lirik ID"
-        elif self.current_lyrics.synced:
+        elif self.current_lyrics.timing_mode == "synced":
             badge = "Sinkron"
+        elif self.current_lyrics.timing_mode == "estimated":
+            badge = "Auto sync"
         else:
             badge = "Teks"
 
@@ -642,6 +661,8 @@ class LyricsOverlayApp(ctk.CTk):
         self.line_items.clear()
         self.active_index = -1
         self.current_offset = 0.0
+        self.manual_scroll_offset = 0.0
+        self.manual_scroll_until = 0.0
 
         width = self.canvas.winfo_width()
         height = self.canvas.winfo_height()
@@ -690,7 +711,7 @@ class LyricsOverlayApp(ctk.CTk):
         canvas_height = max(self.canvas.winfo_height(), 220)
         playback_position = self._get_current_playback_position()
 
-        if self.current_lyrics.synced:
+        if self.current_lyrics.has_timing:
             next_active = self._find_active_index(playback_position)
         else:
             next_active = -1
@@ -701,6 +722,15 @@ class LyricsOverlayApp(ctk.CTk):
 
         base_y = self.line_items[target_index]["base_y"]
         desired_offset = (canvas_height * 0.42) - base_y
+
+        if time.time() <= self.manual_scroll_until:
+            desired_offset += self.manual_scroll_offset
+        else:
+            self.manual_scroll_offset *= 0.84
+            if abs(self.manual_scroll_offset) < 1.0:
+                self.manual_scroll_offset = 0.0
+            desired_offset += self.manual_scroll_offset
+
         self.current_offset += (desired_offset - self.current_offset) * 0.18
 
         if force or next_active != self.active_index:
@@ -722,7 +752,7 @@ class LyricsOverlayApp(ctk.CTk):
             index = item["index"]
 
             if self.active_index == -1:
-                fill = config.COLORS["past"] if index < 6 else config.COLORS["future"]
+                fill = config.COLORS["future"]
                 font = self.font_line
             elif index == self.active_index:
                 fill = config.COLORS["highlight"]

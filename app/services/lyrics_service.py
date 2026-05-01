@@ -9,7 +9,7 @@ from urllib.parse import quote
 import requests
 
 from app import config
-from app.models import LyricsResult, SongInfo
+from app.models import LyricLine, LyricsResult, SongInfo
 from app.services.cache_service import LyricsCache
 from app.services.song_normalizer import build_song_queries, clean_song_title, split_artist_variants, split_track_variants
 from app.utils.lrc_parser import parse_lrc, plain_text_to_lines
@@ -108,9 +108,15 @@ class LyricsService:
         if synced_lyrics:
             lines = parse_lrc(synced_lyrics, fallback_duration=song.duration_seconds)
             synced = True
+            timing_mode = "synced"
         else:
             lines = plain_text_to_lines(plain_lyrics)
             synced = False
+            timing_mode = "plain"
+            if lines:
+                lines = self._estimate_line_timing(lines, song)
+                if lines and any(line.start_time is not None for line in lines):
+                    timing_mode = "estimated"
 
         if not lines:
             return None
@@ -121,6 +127,7 @@ class LyricsService:
             album_name=repair_text(str(best_match.get("albumName", "") or song.album)),
             source="lrclib",
             synced=synced,
+            timing_mode=timing_mode,
             instrumental=instrumental,
             plain_lyrics=repair_text(plain_lyrics),
             fetched_at=time.time(),
@@ -223,6 +230,7 @@ class LyricsService:
                         continue
 
                     lines = plain_text_to_lines(lyrics)
+                    lines = self._estimate_line_timing(lines, song)
                     if not lines:
                         continue
 
@@ -232,6 +240,7 @@ class LyricsService:
                         album_name=song.album,
                         source="lyrics.ovh",
                         synced=False,
+                        timing_mode="estimated" if any(line.start_time is not None for line in lines) else "plain",
                         instrumental=False,
                         plain_lyrics=lyrics,
                         fetched_at=time.time(),
@@ -258,6 +267,55 @@ class LyricsService:
 
         lyrics = repair_text(str(payload.get("lyrics", "") or "")).strip()
         return lyrics
+
+    def _estimate_line_timing(self, lines: list[LyricLine], song: SongInfo) -> list[LyricLine]:
+        if not lines:
+            return lines
+
+        duration = song.duration_seconds
+        if duration is None or duration <= 0:
+            return lines
+
+        total_lines = len(lines)
+        intro_padding = min(max(duration * 0.05, 1.5), 8.0)
+        outro_padding = min(max(duration * 0.02, 1.0), 4.0)
+        usable_duration = max(duration - intro_padding - outro_padding, total_lines * 1.8)
+
+        weights = [self._line_weight(line.text) for line in lines]
+        total_weight = sum(weights) or float(total_lines)
+        current_time = intro_padding
+
+        estimated_lines: list[LyricLine] = []
+        for index, line in enumerate(lines):
+            ratio = weights[index] / total_weight
+            segment_duration = max(1.8, usable_duration * ratio)
+            if index == total_lines - 1:
+                end_time = duration
+            else:
+                end_time = min(duration, current_time + segment_duration)
+
+            estimated_lines.append(
+                LyricLine(
+                    text=line.text,
+                    start_time=current_time,
+                    end_time=end_time,
+                )
+            )
+            current_time = end_time
+
+        return estimated_lines
+
+    @staticmethod
+    def _line_weight(text: str) -> float:
+        value = text.strip()
+        if not value:
+            return 1.0
+        if value.startswith("[") and value.endswith("]"):
+            return 1.8
+
+        char_count = len(value.replace(" ", ""))
+        word_count = max(len(value.split()), 1)
+        return max(1.4, (char_count * 0.18) + (word_count * 0.6))
 
     def _search(self, params: dict[str, str]) -> list[dict[str, Any]]:
         try:

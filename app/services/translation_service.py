@@ -54,6 +54,7 @@ class LyricsTranslationService:
             album_name=lyrics.album_name,
             source=f"{lyrics.source}:{target_language}",
             synced=lyrics.synced,
+            timing_mode=lyrics.timing_mode,
             instrumental=lyrics.instrumental,
             plain_lyrics="\n".join(line.text for line in translated_lines),
             fetched_at=time.time(),

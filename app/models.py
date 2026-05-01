@@ -66,6 +66,7 @@ class LyricsResult:
     album_name: str = ""
     source: str = "network"
     synced: bool = False
+    timing_mode: str = "plain"
     instrumental: bool = False
     plain_lyrics: str = ""
     fetched_at: float = 0.0
@@ -76,6 +77,10 @@ class LyricsResult:
         if self.artist_name and self.track_name:
             return f"{self.artist_name} - {self.track_name}"
         return self.track_name or "Lirik"
+
+    @property
+    def has_timing(self) -> bool:
+        return any(line.start_time is not None for line in self.lines)
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -91,6 +96,7 @@ class LyricsResult:
             album_name=repair_text(str(payload.get("album_name", "") or "")),
             source=str(payload.get("source", "cache") or "cache"),
             synced=bool(payload.get("synced", False)),
+            timing_mode=str(payload.get("timing_mode", "plain") or "plain"),
             instrumental=bool(payload.get("instrumental", False)),
             plain_lyrics=repair_text(str(payload.get("plain_lyrics", "") or "")),
             fetched_at=float(payload.get("fetched_at", 0.0)),
