@@ -710,7 +710,7 @@ class LyricsOverlayApp(ctk.CTk):
             return
 
         song = self.current_song
-        self.cache.delete(song.cache_key())
+        self.lyrics_service.invalidate(song)
         self.last_requested_key = ""
         self.original_lyrics = None
         self.original_lyrics_source = ""

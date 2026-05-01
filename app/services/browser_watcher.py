@@ -7,6 +7,7 @@ from app import config
 from app.models import SongInfo
 from app.services.media_session import MediaSessionReader
 from app.services.song_normalizer import (
+    enrich_song_with_window_title,
     guess_browser_from_title,
     song_from_window_title,
     titles_match_browser_rules,
@@ -30,10 +31,11 @@ class BrowserWatcher(threading.Thread):
             self.stop_event.wait(config.POLL_INTERVAL_SECONDS)
 
     def _detect_current_song(self) -> SongInfo | None:
+        window_song = self._read_youtube_window_title()
         media_song = self.media_reader.get_current_song()
         if media_song:
-            return media_song
-        return self._read_youtube_window_title()
+            return enrich_song_with_window_title(media_song, window_song)
+        return window_song
 
     def _read_youtube_window_title(self) -> SongInfo | None:
         try:
@@ -43,6 +45,7 @@ class BrowserWatcher(threading.Thread):
 
         try:
             titles = list(gw.getAllTitles())
+            active_title = gw.getActiveWindowTitle()
         except Exception:
             return None
 
@@ -52,6 +55,7 @@ class BrowserWatcher(threading.Thread):
 
         matched.sort(
             key=lambda title: (
+                title == active_title,
                 "youtube music" in title.lower(),
                 "google chrome" in title.lower() or "microsoft edge" in title.lower(),
                 len(title),
@@ -62,4 +66,3 @@ class BrowserWatcher(threading.Thread):
         selected = matched[0]
         source_app = guess_browser_from_title(selected)
         return song_from_window_title(selected, source_app)
-

@@ -31,8 +31,10 @@ MISS_TTL_SECONDS = 60 * 15
 
 LRCLIB_SEARCH_URL = "https://lrclib.net/api/search"
 LRCLIB_GET_URL = "https://lrclib.net/api/get"
+LYRICS_OVH_URL = "https://api.lyrics.ovh/v1"
 GOOGLE_TRANSLATE_URL = "https://translate.googleapis.com/translate_a/single"
 USER_AGENT = f"{APP_NAME}/{APP_VERSION}"
+LYRICS_CACHE_VERSION = "lyrics-v2"
 
 LYRIC_LINE_SPACING = 18
 LYRIC_TOP_PADDING = 96
@@ -62,6 +64,10 @@ NOISE_PATTERNS = (
     r"\[(official)\]",
     r"\((audio|lyrics?)\)",
     r"\[(audio|lyrics?)\]",
+    r"\((live|visualizer|karaoke|performance)\)",
+    r"\[(live|visualizer|karaoke|performance)\]",
+    r"\((remastered?|version)\)",
+    r"\[(remastered?|version)\]",
     r"\b(official|lyrics?|audio|video|mv|hd|4k)\b",
 )
 
